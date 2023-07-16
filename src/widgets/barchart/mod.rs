@@ -53,6 +53,8 @@ pub struct BarChart<'a> {
     /// Value necessary for a bar to reach the maximum height (if no value is specified,
     /// the maximum value in the data is taken as reference)
     max: Option<u64>,
+    /// value to render the bars in the horizontal direction
+    horizontal_bars: bool,
 }
 
 impl<'a> Default for BarChart<'a> {
@@ -69,6 +71,7 @@ impl<'a> Default for BarChart<'a> {
             group_gap: 0,
             bar_set: symbols::bar::NINE_LEVELS,
             style: Style::default(),
+            horizontal_bars: false,
         }
     }
 }
@@ -140,6 +143,12 @@ impl<'a> BarChart<'a> {
         self.style = style;
         self
     }
+
+    /// render the bars horizontally
+    pub fn horizontal_bars(mut self, horizontal_bars: bool) -> BarChart<'a> {
+        self.horizontal_bars = horizontal_bars;
+        self
+    }
 }
 
 impl<'a> BarChart<'a> {
@@ -190,6 +199,71 @@ impl<'a> BarChart<'a> {
             let inner_area = block.inner(*area);
             block.render(*area, buf);
             *area = inner_area
+        }
+    }
+
+    fn render_horizontal_bars(self, buf: &mut Buffer, bars_area: Rect, max: u64) {
+        // convert the bar values to ratatui::symbols::bar::Set
+        let groups: Vec<Vec<u16>> = self
+            .data
+            .iter()
+            .map(|group| {
+                group
+                    .bars
+                    .iter()
+                    .map(|bar| (bar.value * u64::from(bars_area.width) / max) as u16)
+                    .collect()
+            })
+            .collect();
+
+        // print all visible bars (without labels and values)
+        let mut bar_y = bars_area.bottom() - 1;
+        for (group_data, mut group) in groups.into_iter().zip(self.data) {
+            let bars = std::mem::take(&mut group.bars);
+
+            let label_offset = bars.len() as u16 * (self.bar_width + self.bar_gap) + self.bar_gap;
+            // if group_gap is zero, then there is no place to print the group label
+            // check also if the group label is still inside the visible area
+            if self.group_gap > 0 && bar_y >= bars_area.top() + label_offset {
+                let label_rect = Rect {
+                    y: bar_y - label_offset,
+                    ..bars_area
+                };
+                group.render_label(buf, label_rect, self.label_style);
+            }
+
+            for (bar_size, bar) in group_data.into_iter().zip(bars) {
+                let bar_style = bar.style.patch(self.bar_style);
+
+                for y in 0..self.bar_width {
+                    for x in 0..bar_size {
+                        buf.get_mut(bars_area.left() + x, bar_y - y)
+                            .set_symbol(self.bar_set.full)
+                            .set_style(bar_style);
+                    }
+                    for x in bar_size..bars_area.width {
+                        buf.get_mut(bars_area.left() + x, bar_y - y)
+                            .set_symbol(self.bar_set.empty)
+                            .set_style(bar_style);
+                    }
+                }
+
+                let bar_value_area = Rect {
+                    y: bar_y - (self.bar_width >> 1),
+                    ..bars_area
+                };
+                bar.render_value_with_different_styles(
+                    buf,
+                    bar_value_area,
+                    bar_size as usize,
+                    self.value_style,
+                    self.bar_style,
+                );
+
+                bar_y = bar_y.saturating_sub(self.bar_gap + self.bar_width);
+            }
+
+            bar_y = bar_y.saturating_sub(self.group_gap);
         }
     }
 
@@ -261,23 +335,24 @@ impl<'a> BarChart<'a> {
         // print labels and values in one go
         let mut bar_x = area.left();
         let bar_y = area.bottom() - label_height - 1;
-        for group in self.data.into_iter() {
-            // print group labels under the bars or the previous labels
-            if let Some(mut label) = group.label {
-                label.patch_style(self.label_style);
-                let label_max_width = group.bars.len() as u16 * self.bar_width
-                    + (group.bars.len() as u16 - 1) * self.bar_gap;
-
-                buf.set_line(
-                    bar_x + (label_max_width.saturating_sub(label.width() as u16) >> 1),
-                    area.bottom() - 1,
-                    &label,
-                    label_max_width,
-                );
+        for mut group in self.data.into_iter() {
+            if group.bars.is_empty() {
+                continue;
             }
+            let bars = std::mem::take(&mut group.bars);
+            // print group labels under the bars or the previous labels
+            let label_max_width =
+                bars.len() as u16 * (self.bar_width + self.bar_gap) - self.bar_gap;
+            let group_area = Rect {
+                x: bar_x,
+                y: area.bottom() - 1,
+                width: label_max_width,
+                height: 1,
+            };
+            group.render_label(buf, group_area, self.label_style);
 
             // print the bar values and numbers
-            for bar in group.bars.into_iter() {
+            for bar in bars.into_iter() {
                 bar.render_label_and_value(
                     buf,
                     self.bar_width,
@@ -312,15 +387,22 @@ impl<'a> Widget for BarChart<'a> {
         let max = self.maximum_data_value();
 
         // remove invisible groups and bars, since we don't need to print them
-        self.remove_invisible_groups_and_bars(area.width);
+        self.remove_invisible_groups_and_bars(if self.horizontal_bars {
+            area.height
+        } else {
+            area.width
+        });
 
-        let bars_area = Rect {
-            height: area.height - label_height,
-            ..area
-        };
-        self.render_bars(buf, bars_area, max);
-
-        self.render_labels_and_values(area, buf, label_height);
+        if self.horizontal_bars {
+            self.render_horizontal_bars(buf, area, max);
+        } else {
+            let bars_area = Rect {
+                height: area.height - label_height,
+                ..area
+            };
+            self.render_bars(buf, bars_area, max);
+            self.render_labels_and_values(area, buf, label_height);
+        }
     }
 }
 
@@ -736,5 +818,36 @@ mod tests {
                 .bg(Color::White)
                 .add_modifier(Modifier::BOLD)
         )
+    }
+
+    #[test]
+    fn test_horizontal_bars() {
+        let chart: BarChart<'_> = BarChart::default()
+            .data(BarGroup::default().label("G1".into()).bars(&[
+                Bar::default().value(2),
+                Bar::default().value(3),
+                Bar::default().value(4),
+            ]))
+            .data(BarGroup::default().label("G2".into()).bars(&[
+                Bar::default().value(3),
+                Bar::default().value(4),
+                Bar::default().value(5),
+            ]))
+            .group_gap(1)
+            .horizontal_bars(true)
+            .bar_gap(0);
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 5, 7));
+        chart.render(buffer.area, &mut buffer);
+        let expected = Buffer::with_lines(vec![
+            "5████",
+            "4███ ",
+            "3██  ",
+            " G1  ",
+            "4███ ",
+            "3██  ",
+            "2█   ",
+        ]);
+        assert_buffer_eq!(buffer, expected);
     }
 }

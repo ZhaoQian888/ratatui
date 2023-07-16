@@ -1,4 +1,4 @@
-use crate::{buffer::Buffer, style::Style, text::Line};
+use crate::{buffer::Buffer, prelude::Rect, style::Style, text::Line};
 
 /// represent a bar to be shown by the Barchart
 ///
@@ -54,6 +54,40 @@ impl<'a> Bar<'a> {
     pub fn text_value(mut self, text_value: String) -> Bar<'a> {
         self.text_value = Some(text_value);
         self
+    }
+
+    pub(super) fn render_value_with_different_styles(
+        self,
+        buf: &mut Buffer,
+        area: Rect,
+        bar_size: usize,
+        default_value_style: Style,
+        bar_style: Style,
+    ) {
+        let text = if let Some(text) = self.text_value {
+            text
+        } else {
+            self.value.to_string()
+        };
+
+        if !text.is_empty() {
+            let style = self.value_style.patch(default_value_style);
+            // Since the value may be longer than the bar itself, we need to use 2 different styles
+            // while rendering. Render the first part with the default value style
+            buf.set_stringn(area.x, area.y, &text, text.len().min(bar_size), style);
+
+            // render the second part with the bar_style
+            if text.len() > bar_size {
+                let (first, second) = text.split_at(bar_size);
+                buf.set_stringn(
+                    area.x + first.len() as u16,
+                    area.y,
+                    second,
+                    area.width as usize - first.len(),
+                    bar_style,
+                );
+            }
+        }
     }
 
     pub(super) fn render_label_and_value(
